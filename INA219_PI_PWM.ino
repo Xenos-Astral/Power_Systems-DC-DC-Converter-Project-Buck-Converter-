@@ -19,8 +19,8 @@ float MeasuredVoltage = 0.0;
 int DutyCycle = 0;
 
 // PI Control Parameters
-float kp = 0.6;
-float ki = 0.1;
+float kp = 0.8;
+float ki = 0.2;
 float ErrorSum = 0;
 const float maxIntegral = 50.0;
 
