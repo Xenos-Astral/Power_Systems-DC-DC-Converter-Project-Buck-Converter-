@@ -5,7 +5,7 @@
 // ==== Pin Assignments ====
 const int buttonUp = 2;         // Increase voltage setpoint
 const int buttonDown = 3;       // Decrease voltage setpoint
-const int LED_PWM = 11;         // PWM output to LED
+const int LED_PWM = 18;         // PWM output to LED
 
 // ==== Control Variables ====
 float DesiredVoltage = 2.0;     // Initial voltage setpoint
