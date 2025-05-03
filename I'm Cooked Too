@@ -1,0 +1,135 @@
+#include <Wire.h>
+#include <Adafruit_INA219.h>
+#include <LiquidCrystal_I2C.h>
+
+// ==== Pin Assignments ====
+// Buttons use INPUT_PULLUP, so LOW = pressed
+const int buttonUp    = 2;    // Increase voltage setpoint
+const int buttonDown  = 3;    // Decrease voltage setpoint
+const int LED_PWM     = 16;   // PWM output to LED (any GPIO capable of PWM)
+const int sensePin    = 34;   // ADC1_CH6 (GPIO34)—analog input for divider
+
+// ==== Voltage Divider Constants ====
+// (used only for display)
+const float R1 = 100000.0;  // 100 kΩ
+const float R2 =  33000.0;  // 33  kΩ
+
+// ==== Control Variables ====
+float DesiredVoltage  = 2.0;   // setpoint (0–3.3V)
+float MeasuredVoltage = 0.0;   // filtered simulated voltage
+int   DutyCycle       = 0;     // 0–255 (we’ll map to 0–4095)
+
+// ==== PI Controller Parameters ====
+float kp       = 0.8;
+float ki       = 0.2;
+float ErrorSum = 0.0;
+const float maxIntegral = 50.0;
+
+// ==== Filter & Voltage Adjust ====
+float alpha         = 0.1;   // filter for simulated voltage
+const float voltageStep = 0.1;
+const float minVoltage  = 0.0;
+const float maxVoltage  = 3.3;
+
+// ==== Time Tracking ====
+unsigned long timePassed = 0;
+
+// ==== INA219 Sensor & LCD ====
+Adafruit_INA219 ina219;
+bool sensorAvailable = false;
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// ==== PWM Setup for ESP32 ====
+const int  pwmChannel = 0;
+const int  pwmFreq    = 5000;
+const int  pwmResolution = 8;    // 8‑bit duty (0–255)
+
+void setup() {
+  // Buttons
+  pinMode(buttonUp,   INPUT_PULLUP);
+  pinMode(buttonDown, INPUT_PULLUP);
+
+  // PWM
+  //ledcSetup(pwmChannel, pwmFreq, pwmResolution);
+  ledcAttach(LED_PWM, PwmFreq, pwmResolution);
+
+  // ADC pin—no pinMode needed
+  analogReadResolution(12);       // 12‑bit (0–4095)
+
+  Serial.begin(115200);
+  Wire.begin();
+
+  sensorAvailable = ina219.begin();
+  if (!sensorAvailable) {
+    Serial.println("INA219 not detected; continuing without INA data.");
+  }
+
+  lcd.init();
+  lcd.backlight();
+
+  Serial.println("System Initialized...");
+  timePassed = millis();
+}
+
+// Simple PI controller: desired/measured in volts → PWM 0–255
+int PI_Controller(float desired, float measured) {
+  float error = desired - measured;
+  ErrorSum += error;
+  ErrorSum = constrain(ErrorSum, -maxIntegral, maxIntegral);
+
+  float output = (kp * error) + (ki * ErrorSum);
+  // map 0–maxVoltage to 0–255
+  int pwm = constrain((int)((output / maxVoltage) * 255.0), 0, 255);
+  return pwm;
+}
+
+void loop() {
+  // --- Button Handling (active LOW) ---
+  if (digitalRead(buttonUp)   == LOW)  DesiredVoltage = min(DesiredVoltage + voltageStep, maxVoltage);
+  if (digitalRead(buttonDown) == LOW)  DesiredVoltage = max(DesiredVoltage - voltageStep, minVoltage);
+
+  // --- Read divider for display only ---
+  int   adcRaw = analogRead(sensePin);       // 0–4095
+  float v_div  = (adcRaw / 4095.0) * 3.3;     // 0–3.3 V
+  // If you need Vin: float v_in = v_div * ((R1+R2)/R2);
+
+  // --- PI update every 50 ms (simulated) ---
+  if (millis() - timePassed > 50) {
+    timePassed = millis();
+
+    float rawV = (DutyCycle / 255.0) * 3.3;               // simulate feedback
+    MeasuredVoltage = alpha * rawV + (1 - alpha) * MeasuredVoltage;
+
+    DutyCycle = PI_Controller(DesiredVoltage, MeasuredVoltage);
+    ledcWrite(pwmChannel, DutyCycle);                    // set ESP32 PWM
+  }
+
+  // --- Optional INA219 readings ---
+  float busV=0, cur_mA=0, p_mW=0, eff=0;
+  if (sensorAvailable) {
+    busV   = ina219.getBusVoltage_V();
+    cur_mA = ina219.getCurrent_mA();
+    p_mW   = ina219.getPower_mW();
+    eff    = p_mW>0 ? (busV*cur_mA/p_mW)*100.0 : 0;
+  }
+
+  // --- Serial Output ---
+  Serial.printf("SP:%.2f Meas(sim):%.2f PWM:%d | Vdiv:%.2fV",
+                DesiredVoltage, MeasuredVoltage, DutyCycle, v_div);
+  if (sensorAvailable) {
+    Serial.printf(" | INA V:%.2f I:%.1f mA Eff:%.1f%%\n",
+                  busV, cur_mA, eff);
+  } else {
+    Serial.println();
+  }
+
+  // --- LCD Output ---
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.printf("SP:%.1f M:%.1f", DesiredVoltage, MeasuredVoltage);
+  lcd.setCursor(0,1);
+  lcd.printf("Vdiv:%.2fV", v_div);
+
+  delay(500);
+}
