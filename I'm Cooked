@@ -1,0 +1,130 @@
+#include <Wire.h>
+#include <Adafruit_INA219.h>
+#include <LiquidCrystal_I2C.h>
+
+// ==== Pin Assignments ====
+const int buttonUp    = 2;   // Increase voltage setpoint
+const int buttonDown  = 3;   // Decrease voltage setpoint
+const int LED_PWM     = 11;  // PWM output to LED
+const int sensePin    = A0;  // Analog input for voltage divider
+
+// ==== Voltage Divider Constants ====
+// (used only for display; PI still uses the simulated voltage)
+const float R1 = 100000.0;  // 100 kΩ
+const float R2 =  33000.0;  // 33  kΩ
+
+// ==== Control Variables ====
+float DesiredVoltage  = 2.0;   // Initial voltage setpoint
+float MeasuredVoltage = 0.0;   // Smoothed simulated voltage
+int   DutyCycle       = 0;     // PWM output duty cycle
+
+// ==== PI Controller Parameters ====
+float kp       = 0.8;
+float ki       = 0.2;
+float ErrorSum = 0;
+const float maxIntegral = 50.0;
+
+// ==== Filter & Voltage Adjust ====
+float alpha         = 0.1;   // low‑pass filter constant (for the simulated voltage)
+const float voltageStep = 0.1;
+const float minVoltage  = 0.0;
+const float maxVoltage  = 3.3;
+
+// ==== Time Tracking ====
+unsigned long timePassed = 0;
+
+// ==== INA219 Sensor & LCD ====
+Adafruit_INA219 ina219;
+bool sensorAvailable = false;
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+void setup() {
+  pinMode(buttonUp,    INPUT);
+  pinMode(buttonDown,  INPUT);
+  pinMode(LED_PWM,     OUTPUT);
+  
+  Serial.begin(115200);
+  Wire.begin();
+
+  sensorAvailable = ina219.begin();
+  if (!sensorAvailable) {
+    Serial.println("INA219 not detected, continuing without sensor data.");
+  }
+
+  lcd.init();
+  lcd.backlight();
+
+  Serial.println("System Initialized...");
+  timePassed = millis();
+}
+
+// Simple PI controller returning PWM 0–255
+int PI_Controller(float desired, float measured) {
+  float error = desired - measured;
+  ErrorSum += error;
+  ErrorSum = constrain(ErrorSum, -maxIntegral, maxIntegral);
+
+  float output = (kp * error) + (ki * ErrorSum);
+  int pwm = constrain(map(output * 100, 0, maxVoltage * 100, 0, 255), 0, 255);
+  return pwm;
+}
+
+void loop() {
+  // --- Button Handling ---
+  if (digitalRead(buttonUp) == HIGH)
+    DesiredVoltage = min(DesiredVoltage + voltageStep, maxVoltage);
+  if (digitalRead(buttonDown) == HIGH)
+    DesiredVoltage = max(DesiredVoltage - voltageStep, minVoltage);
+
+  // --- Read divider every cycle (for display only) ---
+  int adcRaw = analogRead(sensePin);
+  // Optional: convert to voltage if you want
+  float v_adc = (adcRaw / 1023.0) * 5.0;  
+  float v_div = v_adc * (R1 + R2) / R2;
+
+  // --- PI update every 50ms (simulation-based) ---
+  if (millis() - timePassed > 50) {
+    timePassed = millis();
+
+    // Simulate measured voltage from PWM
+    float rawVoltage = (DutyCycle / 255.0) * 3.3;
+    MeasuredVoltage = alpha * rawVoltage + (1 - alpha) * MeasuredVoltage;
+
+    DutyCycle = PI_Controller(DesiredVoltage, MeasuredVoltage);
+    analogWrite(LED_PWM, DutyCycle);
+  }
+
+  float busV = 0.0, cur_mA = 0.0, p_mW = 0.0, eff = 0.0;
+  if (sensorAvailable) {
+    busV  = ina219.getBusVoltage_V();
+    cur_mA= ina219.getCurrent_mA();
+    p_mW  = ina219.getPower_mW();
+    eff   = p_mW>0 ? (busV * cur_mA / p_mW) * 100 : 0;
+  }
+
+  // --- Serial Output ---
+  Serial.print("SP:");  Serial.print(DesiredVoltage,2);
+  Serial.print(" Meas(sim):"); Serial.print(MeasuredVoltage,2);
+  Serial.print(" PWM:"); Serial.print(DutyCycle);
+  Serial.print(" | ADC:"); Serial.print(adcRaw);
+  Serial.print(" ("); Serial.print(v_div,2); Serial.print(" V)");
+  if (sensorAvailable) {
+    Serial.print(" | INA V:"); Serial.print(busV,2);
+    Serial.print(" I:");     Serial.print(cur_mA,1);
+    Serial.print(" mA Eff:");Serial.print(eff,1); Serial.println("%");
+  } else {
+    Serial.println(" | INA N/A");
+  }
+
+  // --- LCD Output ---
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("SP:"); lcd.print(DesiredVoltage,1);
+  lcd.print(" Meas:"); lcd.print(MeasuredVoltage,1);
+  lcd.setCursor(0,1);
+  lcd.print("ADC:"); lcd.print(adcRaw);
+  lcd.print(" PWM:"); lcd.print(DutyCycle);
+
+  delay(500);
+}
